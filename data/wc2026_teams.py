@@ -34,38 +34,6 @@ from __future__ import annotations
 # Seeding: Pot 1 = hosts + ranked nations; geographic/confederation spread
 # ─────────────────────────────────────────────────────────────────────────────
 GROUPS: dict[str, list[str]] = {
-    "A": ["ENGLAND",     "USA",         "CAMEROON",    "IRAN"],
-    "B": ["GERMANY",     "CANADA",      "SOUTH KOREA", "NIGERIA"],
-    "C": ["SPAIN",       "MEXICO",      "AUSTRALIA",   "IVORY COAST"],
-    "D": ["FRANCE",      "ARGENTINA",   "SAUDI ARABIA","NEW ZEALAND"],
-    "E": ["BRAZIL",      "CROATIA",     "JAPAN",       "MOROCCO"],
-    "F": ["PORTUGAL",    "COLOMBIA",    "SENEGAL",     "ECUADOR"],
-    "G": ["NETHERLANDS", "URUGUAY",     "EGYPT",       "PANAMA"],
-    "H": ["BELGIUM",     "CHILE",       "IRAN",        "COSTA RICA"],  # Iran removed from A
-    "I": ["ITALY",       "SWITZERLAND", "ALGERIA",     "COSTA RICA"],
-    "J": ["DENMARK",     "ROMANIA",     "MALI",        "VENEZUELA"],
-    "K": ["AUSTRIA",     "HUNGARY",     "JORDAN",      "HONDURAS"],
-    "L": ["SERBIA",      "POLAND",      "PARAGUAY",    "UZBEKISTAN"],
-}
-
-# Fix: Iran appeared in both A and H — corrected below with deduplicated groups
-GROUPS = {
-    "A": ["ENGLAND",     "USA",          "CAMEROON",     "IRAN"],
-    "B": ["GERMANY",     "CANADA",       "SOUTH KOREA",  "NIGERIA"],
-    "C": ["SPAIN",       "MEXICO",       "AUSTRALIA",    "IVORY COAST"],
-    "D": ["FRANCE",      "ARGENTINA",    "SAUDI ARABIA", "NEW ZEALAND"],
-    "E": ["BRAZIL",      "CROATIA",      "JAPAN",        "MOROCCO"],
-    "F": ["PORTUGAL",    "COLOMBIA",     "SENEGAL",      "ECUADOR"],
-    "G": ["NETHERLANDS", "URUGUAY",      "EGYPT",        "PANAMA"],
-    "H": ["BELGIUM",     "SWITZERLAND",  "ALGERIA",      "COSTA RICA"],
-    "I": ["ITALY",       "DENMARK",      "SOUTH AFRICA", "JAMAICA"],
-    "J": ["NETHERLANDS", "ROMANIA",      "MALI",         "VENEZUELA"],
-    "K": ["AUSTRIA",     "HUNGARY",      "JORDAN",       "HONDURAS"],
-    "L": ["SERBIA",      "POLAND",       "PARAGUAY",     "UZBEKISTAN"],
-}
-
-# Final corrected groups (no duplicates, all 48 unique teams):
-GROUPS = {
     "A": ["ENGLAND",      "USA",          "CAMEROON",     "IRAN"],
     "B": ["GERMANY",      "CANADA",       "SOUTH KOREA",  "NIGERIA"],
     "C": ["SPAIN",        "MEXICO",       "AUSTRALIA",    "IVORY COAST"],

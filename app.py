@@ -578,8 +578,24 @@ elif page == "tournament":
     st.markdown("Full 2026 World Cup group stage standings and predictions.")
     st.divider()
 
-    from data.wc2026_teams import GROUPS, RESULTS_SO_FAR
+    from data.wc2026_teams import GROUPS as _BUNDLED_GROUPS, RESULTS_SO_FAR as _BUNDLED_RESULTS
+    from data.loader import FootballDataClient
     from ui.predictions import render_match_card, render_group_standings
+
+    _fd_client = FootballDataClient()
+
+    # Use live API groups when available; fall back to bundled data
+    _live_groups = _fd_client.get_live_groups()
+    display_groups = _live_groups if _live_groups else _BUNDLED_GROUPS
+
+    # Use live completed matches from API; fall back to bundled results
+    if not _fd_client._demo:
+        _api_results = _fd_client.get_completed_matches()
+        display_results = _api_results if _api_results else _BUNDLED_RESULTS
+        if _live_groups:
+            st.success("⚡ **LIVE DATA** — Groups and results synced from football-data.org")
+    else:
+        display_results = _BUNDLED_RESULTS
 
     predictions = get_all_predictions(dc_weight, xgb_weight)
     all_odds    = get_all_odds()
@@ -588,16 +604,16 @@ elif page == "tournament":
     )
 
     # Group tabs
-    group_tabs = st.tabs([f"GROUP {g}" for g in sorted(GROUPS.keys())])
+    group_tabs = st.tabs([f"GROUP {g}" for g in sorted(display_groups.keys())])
 
-    for tab, (group_letter, teams) in zip(group_tabs, sorted(GROUPS.items())):
+    for tab, (group_letter, teams) in zip(group_tabs, sorted(display_groups.items())):
         with tab:
             col1, col2 = st.columns([1, 2])
 
             with col1:
-                # Standings table
+                # Standings table built from live or bundled results
                 group_results = [
-                    r for r in RESULTS_SO_FAR
+                    r for r in display_results
                     if r["home"] in teams and r["away"] in teams
                 ]
                 render_group_standings(group_letter, teams, group_results)

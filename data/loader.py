@@ -162,8 +162,8 @@ class FootballDataClient:
         # Normalise API response to our internal format
         normalised: list[dict] = []
         for m in data.get("matches", []):
-            home = m.get("homeTeam", {}).get("name", "").upper()
-            away = m.get("awayTeam", {}).get("name", "").upper()
+            home = _normalize_team(m.get("homeTeam", {}).get("name", ""))
+            away = _normalize_team(m.get("awayTeam", {}).get("name", ""))
             score = m.get("score", {}).get("fullTime", {})
             status = m.get("status", "")
             utc_date = m.get("utcDate", "")[:10]  # YYYY-MM-DD
@@ -171,6 +171,7 @@ class FootballDataClient:
             home_score = score.get("home")
             away_score = score.get("away")
             stage_raw  = m.get("stage", "GROUP_STAGE")
+            group_raw  = m.get("group", "")
 
             normalised.append({
                 "date":       utc_date,
@@ -179,6 +180,7 @@ class FootballDataClient:
                 "home_score": home_score,
                 "away_score": away_score,
                 "stage":      _normalise_stage(stage_raw),
+                "group":      _normalize_group(group_raw),
                 "venue":      m.get("venue", ""),
                 "status":     status,
             })
@@ -200,6 +202,31 @@ class FootballDataClient:
             if m.get("home_score") is not None
             and m.get("away_score") is not None
         ]
+
+    def get_live_groups(self) -> dict[str, list[str]] | None:
+        """Derive group assignments from live API fixture data.
+
+        Returns a dict like {"A": ["TEAM1", "TEAM2", ...], ...} built from
+        the group field in each GROUP stage match.
+        Returns None in demo mode or if the API call fails.
+        """
+        if self._demo:
+            return None
+
+        matches = self.get_wc_matches()
+        groups: dict[str, set[str]] = {}
+        for m in matches:
+            g = m.get("group", "")
+            if not g or m.get("stage") != "GROUP":
+                continue
+            groups.setdefault(g, set()).add(m["home"])
+            groups.setdefault(g, set()).add(m["away"])
+
+        if not groups:
+            logger.warning("get_live_groups: no group data in API response — using bundled GROUPS")
+            return None
+
+        return {k: sorted(v) for k, v in sorted(groups.items())}
 
 
 # ─── Odds API Client ─────────────────────────────────────────────────────────
@@ -302,6 +329,44 @@ class OddsAPIClient:
 
 
 # ─── Private helpers ─────────────────────────────────────────────────────────
+
+# Maps football-data.org / other API name variants → our internal names
+_TEAM_NAME_MAP: dict[str, str] = {
+    "UNITED STATES":           "USA",
+    "KOREA REPUBLIC":          "SOUTH KOREA",
+    "REPUBLIC OF KOREA":       "SOUTH KOREA",
+    "IR IRAN":                 "IRAN",
+    "ISLAMIC REPUBLIC OF IRAN":"IRAN",
+    "CÔTE D'IVOIRE":           "IVORY COAST",
+    "COTE D'IVOIRE":           "IVORY COAST",
+    "CÔTE D'IVOIRE":           "IVORY COAST",
+    "IVORY COAST":             "IVORY COAST",
+    "GUINEA":                  "GUINEA",
+    "TRINIDAD AND TOBAGO":     "TRINIDAD & TOBAGO",
+    "NORTH MACEDONIA":         "NORTH MACEDONIA",
+    "CAPE VERDE":              "CAPE VERDE",
+    "GUINEA-BISSAU":           "GUINEA-BISSAU",
+    "REPUBLIC OF IRELAND":     "IRELAND",
+    "HONG KONG":               "HONG KONG",
+    "CHINESE TAIPEI":          "CHINESE TAIPEI",
+    "PAPUA NEW GUINEA":        "PAPUA NEW GUINEA",
+    "CENTRAL AFRICAN REPUBLIC":"CENTRAL AFRICAN REPUBLIC",
+}
+
+
+def _normalize_team(name: str) -> str:
+    """Normalize a team name from the API to our internal format."""
+    upper = name.upper().strip()
+    return _TEAM_NAME_MAP.get(upper, upper)
+
+
+def _normalize_group(raw: str) -> str:
+    """Convert 'GROUP_A' or 'Group A' → 'A'. Returns '' if not a group stage."""
+    if not raw:
+        return ""
+    upper = raw.upper().replace("GROUP_", "").replace("GROUP ", "").strip()
+    return upper if len(upper) == 1 and upper.isalpha() else ""
+
 
 def _normalise_stage(raw: str) -> str:
     """Convert football-data.org stage names to our internal codes."""
