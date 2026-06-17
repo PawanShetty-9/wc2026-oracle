@@ -56,6 +56,7 @@ import numpy as np
 import pandas as pd
 import scipy.optimize
 import scipy.stats
+from scipy.special import gammaln
 
 logger = logging.getLogger(__name__)
 
@@ -150,52 +151,54 @@ class DixonColesModel:
         x0 = np.zeros(2 * n + 2)
         x0[2 * n + 1] = -0.1  # small negative rho as starting point
 
-        # Build match list for faster iteration in the objective function
-        matches = [
-            {
-                "hi":     team_idx[row.home_team],
-                "ai":     team_idx[row.away_team],
-                "hg":     int(row.home_score),
-                "ag":     int(row.away_score),
-                "w":      row.weight,
-                "neutral": bool(row.neutral),
-            }
-            for row in df.itertuples()
-            if row.home_team in team_idx and row.away_team in team_idx
+        # Pre-compute match arrays for vectorised objective function
+        valid_rows = df[
+            df["home_team"].isin(team_idx) & df["away_team"].isin(team_idx)
         ]
+        hi_arr      = np.array([team_idx[t] for t in valid_rows["home_team"]])
+        ai_arr      = np.array([team_idx[t] for t in valid_rows["away_team"]])
+        hg_arr      = valid_rows["home_score"].to_numpy(dtype=float)
+        ag_arr      = valid_rows["away_score"].to_numpy(dtype=float)
+        weights_arr = valid_rows["weight"].to_numpy(dtype=float)
+        neutral_arr = valid_rows["neutral"].to_numpy(dtype=bool)
+        # Pre-compute log(k!) terms — constant across all optimizer iterations
+        gammaln_hg  = gammaln(hg_arr + 1)
+        gammaln_ag  = gammaln(ag_arr + 1)
 
         def neg_log_likelihood(params: np.ndarray) -> float:
-            """Negative weighted log-likelihood (minimised by L-BFGS-B)."""
-            attack  = params[:n]
-            defense = params[n:2*n]
+            """Vectorised negative weighted log-likelihood (minimised by L-BFGS-B)."""
+            attack   = params[:n]
+            defense  = params[n:2*n]
             home_adv = params[2*n]
             rho      = params[2*n+1]
 
-            total = 0.0
-            for m in matches:
-                hi, ai = m["hi"], m["ai"]
-                hg, ag = m["hg"], m["ag"]
-                neutral = m["neutral"]
+            # Expected goals (log-linear model) — fully vectorised
+            ha = np.where(neutral_arr, 0.0, home_adv)
+            log_lam_h = attack[hi_arr] + defense[ai_arr] + ha
+            log_lam_a = attack[ai_arr] + defense[hi_arr]
+            lam_h = np.exp(log_lam_h)
+            lam_a = np.exp(log_lam_a)
 
-                # Expected goals (log-linear model)
-                log_lam_h = attack[hi] + defense[ai] + (0.0 if neutral else home_adv)
-                log_lam_a = attack[ai] + defense[hi]
+            # Poisson log-pmf: k·log(λ) − λ − log(k!)
+            log_p_h = hg_arr * log_lam_h - lam_h - gammaln_hg
+            log_p_a = ag_arr * log_lam_a - lam_a - gammaln_ag
 
-                lam_h = np.exp(log_lam_h)
-                lam_a = np.exp(log_lam_a)
+            # Dixon-Coles tau correction — vectorised per-score mask
+            tau = np.ones(len(hi_arr))
+            m00 = (hg_arr == 0) & (ag_arr == 0)
+            m10 = (hg_arr == 1) & (ag_arr == 0)
+            m01 = (hg_arr == 0) & (ag_arr == 1)
+            m11 = (hg_arr == 1) & (ag_arr == 1)
+            tau[m00] = 1.0 - lam_h[m00] * lam_a[m00] * rho
+            tau[m10] = 1.0 + lam_a[m10] * rho
+            tau[m01] = 1.0 + lam_h[m01] * rho
+            tau[m11] = 1.0 - rho
 
-                # Poisson log-probability
-                log_p_h = scipy.stats.poisson.logpmf(hg, lam_h)
-                log_p_a = scipy.stats.poisson.logpmf(ag, lam_a)
-
-                # Dixon-Coles tau correction for low scores
-                tau = _tau_correction(hg, ag, lam_h, lam_a, rho)
-                if tau <= 0:
-                    # Degenerate: skip this match to avoid log(0)
-                    continue
-
-                log_likelihood = log_p_h + log_p_a + np.log(tau)
-                total += m["w"] * log_likelihood
+            valid = tau > 0
+            log_tau = np.where(valid, np.log(np.clip(tau, 1e-10, None)), 0.0)
+            total = np.sum(
+                weights_arr[valid] * (log_p_h[valid] + log_p_a[valid] + log_tau[valid])
+            )
 
             # L2 regularisation to prevent extreme parameter values
             reg = 0.001 * np.sum(params[:2*n] ** 2)

@@ -131,7 +131,11 @@ class FeatureEngineer:
         dc_model: object,       # DixonColesModel instance
         team_meta: dict,        # from wc2026_teams.TEAM_META
     ) -> None:
-        self.df       = historical_df
+        # Pre-parse dates and pre-sort once so form lookups never repeat this work
+        df = historical_df.copy()
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").reset_index(drop=True)
+        self.df       = df
         self.elo      = elo_system
         self.dc       = dc_model
         self.meta     = team_meta

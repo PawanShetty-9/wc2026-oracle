@@ -30,7 +30,7 @@ HOW TO DEBUG:
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -235,7 +235,6 @@ def _generate_synthetic_matches(n: int = 3000, seed: int = 42) -> pd.DataFrame:
         away_goals = int(rng.poisson(away_lambda))
 
         # Advance date by 1–10 days
-        from datetime import timedelta
         current_date = current_date + timedelta(days=int(rng.integers(1, 11)))
         if current_date > date(2022, 12, 18):
             current_date = date(1993, 1, 1)  # wrap around

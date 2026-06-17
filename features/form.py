@@ -261,24 +261,16 @@ def _get_team_matches(
     """Return up to n most recent matches for a team before before_date.
 
     Results are sorted in ASCENDING date order (oldest first within the
-    returned window). This is important for exponential weighting to work
-    correctly in calculate_goals_stats().
+    returned window). Assumes df is already sorted ascending by date with
+    datetime dtype (FeatureEngineer pre-processes this once at init time).
     """
-    # Ensure date column is datetime for comparison
-    df_copy = df.copy()
-    df_copy["date"] = pd.to_datetime(df_copy["date"])
-
     cutoff = pd.Timestamp(before_date)
-
-    # Filter to matches involving the team, before the cutoff date
     mask = (
-        ((df_copy["home_team"] == team) | (df_copy["away_team"] == team))
-        & (df_copy["date"] < cutoff)
+        ((df["home_team"] == team) | (df["away_team"] == team))
+        & (df["date"] < cutoff)
     )
-    team_df = df_copy[mask].sort_values("date", ascending=False).head(n)
-
-    # Return in ascending order (oldest first) for the consumer
-    return team_df.sort_values("date", ascending=True)
+    # df is pre-sorted ascending, so tail(n) gives the n most-recent in order
+    return df[mask].tail(n)
 
 
 def _team_result(team: str, row: pd.Series) -> str:
