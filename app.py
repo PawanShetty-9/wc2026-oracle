@@ -228,7 +228,13 @@ def load_all_models():
     """
     from data.historical import load_training_data
     from data.wc2026_teams import TEAM_META, RESULTS_SO_FAR, GROUPS
+    from data.loader import ESPNClient as _ESPN
     from models.elo import EloSystem
+
+    # Prefer live results from ESPN; fall back to bundled RESULTS_SO_FAR
+    _espn = _ESPN()
+    _live_results = _espn.get_completed_matches()
+    _wc_actual = _live_results if _live_results else RESULTS_SO_FAR
     from models.dixon_coles import DixonColesModel
     from models.xgboost_model import load_or_train_xgb
     from models.calibration import ProbabilityCalibrator
@@ -240,9 +246,9 @@ def load_all_models():
     logger.info("Loading historical training data...")
     train_df = load_training_data(min_year=1993)
 
-    # Augment training data with actual WC 2026 results (24 real matches)
+    # Augment training data with actual WC 2026 results from ESPN (live) or bundled fallback
     _wc_rows = []
-    for _r in RESULTS_SO_FAR:
+    for _r in _wc_actual:
         _hs, _as = _r["home_score"], _r["away_score"]
         _wc_rows.append({
             "date":       _r["date"],
@@ -267,8 +273,8 @@ def load_all_models():
     elo = EloSystem(initial_ratings=initial_ratings)
     elo.train_on_history(train_df)
 
-    # Update ELO with actual WC 2026 tournament results so far
-    for result in RESULTS_SO_FAR:
+    # Update ELO with actual WC 2026 tournament results (live from ESPN)
+    for result in _wc_actual:
         elo.update(
             home_team=result["home"],
             away_team=result["away"],
@@ -277,7 +283,7 @@ def load_all_models():
             is_wc=True,
             is_neutral=True,
         )
-    logger.info("ELO updated with %d WC 2026 results", len(RESULTS_SO_FAR))
+    logger.info("ELO updated with %d WC 2026 results (live)", len(_wc_actual))
 
     # ── Dixon-Coles Model ─────────────────────────────────────────────────
     logger.info("Fitting Dixon-Coles model...")
@@ -312,8 +318,8 @@ def load_all_models():
     # ── Retrospective prediction accuracy for completed WC 2026 matches ───
     from data.cache import log_prediction, settle_prediction
     from datetime import date as _date
-    logger.info("Computing retrospective accuracy for %d completed WC matches...", len(RESULTS_SO_FAR))
-    for _result in RESULTS_SO_FAR:
+    logger.info("Computing retrospective accuracy for %d completed WC matches...", len(_wc_actual))
+    for _result in _wc_actual:
         _home = _result["home"]
         _away = _result["away"]
         _date_str = _result["date"]
@@ -367,16 +373,28 @@ def get_all_predictions(dc_weight: float, xgb_weight: float) -> list:
     Cached for 30 minutes (TTL) or invalidated when weights change.
     """
     from data.wc2026_teams import upcoming_matches
+    from data.loader import ESPNClient
     models = load_all_models()
 
-    # Update ensemble weights from user settings
     models["predictor"].weights = {
         "dixon_coles": dc_weight,
         "xgboost":     xgb_weight,
     }
 
     today = date.today()
-    upcoming = upcoming_matches(as_of_date=today.isoformat())
+    today_str = today.isoformat()
+
+    # Use ESPN live fixtures (no key needed); fall back to bundled schedule
+    _espn = ESPNClient()
+    _all_espn = _espn.get_wc_matches()
+    if _all_espn:
+        upcoming = [
+            m for m in _all_espn
+            if m.get("home_score") is None and m["date"] >= today_str
+        ]
+    else:
+        upcoming = upcoming_matches(as_of_date=today_str)
+
     return models["predictor"].predict_all_upcoming(upcoming, today)
 
 
@@ -458,14 +476,14 @@ xgb_weight      = settings["xgb_weight"]
 show_matrix     = settings["show_score_matrix"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DEMO MODE BANNER
+# DEMO MODE BANNER — ESPN always provides live data, no key needed
+# Only show banner if odds are running on demo (no ODDS_API_KEY)
 # ─────────────────────────────────────────────────────────────────────────────
-from data.loader import is_demo_mode
-if is_demo_mode():
-    st.warning(
-        "⚡ **DEMO MODE** — Running on bundled data. "
-        "Add `FOOTBALL_DATA_API_KEY` and `ODDS_API_KEY` in Streamlit secrets for live predictions. "
-        "[Get free keys ↗](https://www.football-data.org/client/register)"
+from data.loader import OddsAPIClient as _OddsCheck
+if _OddsCheck()._demo:
+    st.info(
+        "⚡ **LIVE DATA** via ESPN (no API key required) · "
+        "Odds shown are ELO-based estimates — add `ODDS_API_KEY` in Streamlit secrets for live bookmaker odds."
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -579,23 +597,19 @@ elif page == "tournament":
     st.divider()
 
     from data.wc2026_teams import GROUPS as _BUNDLED_GROUPS, RESULTS_SO_FAR as _BUNDLED_RESULTS
-    from data.loader import FootballDataClient
+    from data.loader import ESPNClient
     from ui.predictions import render_match_card, render_group_standings
 
-    _fd_client = FootballDataClient()
+    _espn_client = ESPNClient()
 
-    # Use live API groups when available; fall back to bundled data
-    _live_groups = _fd_client.get_live_groups()
-    display_groups = _live_groups if _live_groups else _BUNDLED_GROUPS
+    # ESPN: always live, no key needed
+    _espn_standings = _espn_client.get_wc_standings()
+    _live_groups    = _espn_client.get_live_groups()
+    display_groups  = _live_groups if _live_groups else _BUNDLED_GROUPS
+    display_results = _espn_client.get_completed_matches() or _BUNDLED_RESULTS
 
-    # Use live completed matches from API; fall back to bundled results
-    if not _fd_client._demo:
-        _api_results = _fd_client.get_completed_matches()
-        display_results = _api_results if _api_results else _BUNDLED_RESULTS
-        if _live_groups:
-            st.success("⚡ **LIVE DATA** — Groups and results synced from football-data.org")
-    else:
-        display_results = _BUNDLED_RESULTS
+    if _live_groups:
+        st.success("⚡ **LIVE DATA** — Groups and standings synced from ESPN (no API key required)")
 
     predictions = get_all_predictions(dc_weight, xgb_weight)
     all_odds    = get_all_odds()
@@ -611,12 +625,17 @@ elif page == "tournament":
             col1, col2 = st.columns([1, 2])
 
             with col1:
-                # Standings table built from live or bundled results
-                group_results = [
-                    r for r in display_results
-                    if r["home"] in teams and r["away"] in teams
-                ]
-                render_group_standings(group_letter, teams, group_results)
+                # Use ESPN live standings when available
+                espn_group_standings = _espn_standings.get(group_letter) if _espn_standings else None
+                if espn_group_standings:
+                    render_group_standings(group_letter, teams, display_results,
+                                           live_standings=espn_group_standings)
+                else:
+                    group_results = [
+                        r for r in display_results
+                        if r["home"] in teams and r["away"] in teams
+                    ]
+                    render_group_standings(group_letter, teams, group_results)
 
             with col2:
                 # Upcoming matches in this group

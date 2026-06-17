@@ -217,67 +217,62 @@ def render_group_standings(
     group: str,
     teams: list[str],
     results: list[dict],
+    live_standings: list[dict] | None = None,
 ) -> None:
     """Render a group table (W/D/L/GD/Pts) for a given group.
 
     Parameters
     ----------
-    group   : str  — group letter ("A", "B", etc.)
-    teams   : list — 4 team names in this group
-    results : list — all completed matches (from RESULTS_SO_FAR)
+    group          : group letter ("A"…"L")
+    teams          : 4 team names in this group
+    results        : completed match dicts (fallback for computing standings)
+    live_standings : pre-computed standings from ESPN API (preferred)
     """
     import pandas as pd
 
-    # Build standings from results
-    standings: dict[str, dict] = {
-        t: {"P": 0, "W": 0, "D": 0, "L": 0, "GF": 0, "GA": 0, "Pts": 0}
-        for t in teams
-    }
-
-    for r in results:
-        home, away = r["home"], r["away"]
-        if home not in standings or away not in standings:
-            continue
-
-        hs, as_ = int(r["home_score"]), int(r["away_score"])
-        standings[home]["P"]  += 1
-        standings[away]["P"]  += 1
-        standings[home]["GF"] += hs
-        standings[home]["GA"] += as_
-        standings[away]["GF"] += as_
-        standings[away]["GA"] += hs
-
-        if hs > as_:
-            standings[home]["W"]   += 1
-            standings[home]["Pts"] += 3
-            standings[away]["L"]   += 1
-        elif hs < as_:
-            standings[away]["W"]   += 1
-            standings[away]["Pts"] += 3
-            standings[home]["L"]   += 1
-        else:
-            standings[home]["D"]   += 1
-            standings[home]["Pts"] += 1
-            standings[away]["D"]   += 1
-            standings[away]["Pts"] += 1
-
-    # Build DataFrame
-    rows = []
-    for team, s in standings.items():
-        rows.append({
-            "Team":     team,
-            "P":  s["P"],
-            "W":  s["W"],
-            "D":  s["D"],
-            "L":  s["L"],
-            "GF": s["GF"],
-            "GA": s["GA"],
-            "GD": s["GF"] - s["GA"],
-            "Pts": s["Pts"],
-        })
-
-    df = pd.DataFrame(rows).sort_values(["Pts", "GD", "GF"], ascending=False).reset_index(drop=True)
-    df.index = df.index + 1  # 1-indexed position
+    if live_standings:
+        # Use live standings directly from ESPN — already sorted by position
+        rows = []
+        for e in live_standings:
+            rows.append({
+                "Team": e["team"],
+                "P":    e["gp"],
+                "W":    e["w"],
+                "D":    e["d"],
+                "L":    e["l"],
+                "GF":   e["gf"],
+                "GA":   e["ga"],
+                "GD":   e["gd"],
+                "Pts":  e["pts"],
+            })
+        df = pd.DataFrame(rows).reset_index(drop=True)
+        df.index = df.index + 1
+    else:
+        # Compute standings from raw match results (fallback)
+        table: dict[str, dict] = {
+            t: {"P": 0, "W": 0, "D": 0, "L": 0, "GF": 0, "GA": 0, "Pts": 0}
+            for t in teams
+        }
+        for r in results:
+            home, away = r["home"], r["away"]
+            if home not in table or away not in table:
+                continue
+            hs, as_ = int(r["home_score"]), int(r["away_score"])
+            table[home]["P"]  += 1; table[away]["P"]  += 1
+            table[home]["GF"] += hs; table[home]["GA"] += as_
+            table[away]["GF"] += as_; table[away]["GA"] += hs
+            if hs > as_:
+                table[home]["W"] += 1; table[home]["Pts"] += 3; table[away]["L"] += 1
+            elif hs < as_:
+                table[away]["W"] += 1; table[away]["Pts"] += 3; table[home]["L"] += 1
+            else:
+                table[home]["D"] += 1; table[home]["Pts"] += 1
+                table[away]["D"] += 1; table[away]["Pts"] += 1
+        rows = [{"Team": t, "P": s["P"], "W": s["W"], "D": s["D"], "L": s["L"],
+                 "GF": s["GF"], "GA": s["GA"], "GD": s["GF"]-s["GA"], "Pts": s["Pts"]}
+                for t, s in table.items()]
+        df = pd.DataFrame(rows).sort_values(["Pts", "GD", "GF"], ascending=False).reset_index(drop=True)
+        df.index = df.index + 1
 
     st.markdown(
         f"<h4 style='color:#00FFD1; font-family:Orbitron; letter-spacing:0.1em;'>GROUP {group}</h4>",

@@ -1,42 +1,26 @@
 """
-data/loader.py — Live Data API Clients (with Demo-Mode Fallback)
-================================================================
-Two API clients for live World Cup data:
-  1. FootballDataClient  → football-data.org (match results, fixtures)
-  2. OddsAPIClient       → the-odds-api.com (bookmaker odds)
+data/loader.py — Live Data Clients
+===================================
+Three data sources, in priority order:
+
+  1. ESPNClient (PRIMARY — no API key, always works)
+     → Live scores, group standings, full fixture list
+     → ESPN's public endpoints require zero registration
+     → Used for all match data by default
+
+  2. FootballDataClient (SECONDARY — optional football-data.org key)
+     → Adds group labels to fixtures (GROUP_A, GROUP_B, etc.)
+     → Useful if ESPN group inference fails
+     → 10 requests/minute free tier
+
+  3. OddsAPIClient (OPTIONAL — the-odds-api.com key)
+     → Live bookmaker odds
+     → 500 requests/month free tier
+     → Falls back to ELO-based DEMO_ODDS if no key
 
 DEMO MODE:
-  If no API keys are configured, both clients automatically fall back
-  to bundled data from wc2026_teams.py. The app works identically in
-  demo mode; the only difference is that odds and results won't update
-  in real time.
-
-  is_demo_mode() returns True when running without API keys.
-  The UI shows a yellow banner in demo mode.
-
-API KEY SETUP:
-  Option A (Streamlit Cloud): Add secrets in the Streamlit Cloud UI
-    FOOTBALL_DATA_API_KEY = "..."
-    ODDS_API_KEY = "..."
-
-  Option B (local): Create betting/.streamlit/secrets.toml
-    FOOTBALL_DATA_API_KEY = "..."
-    ODDS_API_KEY = "..."
-
-  Option C (environment variable):
-    export FOOTBALL_DATA_API_KEY=...
-    export ODDS_API_KEY=...
-
-RATE LIMIT PROTECTION:
-  The Odds API free tier has 500 requests/month.
-  We cache responses for 30 minutes to use at most ~1500 req/month at
-  maximum page activity — well within the free limit.
-
-HOW TO DEBUG:
-  - Set logging level to DEBUG to see all API requests and cache decisions
-  - If you get 429 (rate limit), increase cache TTL or switch to demo mode
-  - If matches are missing from the schedule, check football-data.org WC
-    competition code — it may change between years ("WC" vs "CL" etc.)
+  is_demo_mode() now returns False — ESPN always provides live data.
+  The only "demo" element is odds when no ODDS_API_KEY is set.
 """
 
 from __future__ import annotations
@@ -44,13 +28,13 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date, datetime, timedelta
-from typing import Any
 
 import requests
 
 from data.cache import get_cached, set_cached
 from data.wc2026_teams import (
     DEMO_ODDS,
+    GROUPS,
     RESULTS_SO_FAR,
     SCHEDULE,
     TEAM_META,
@@ -60,79 +44,263 @@ from data.wc2026_teams import (
 
 logger = logging.getLogger(__name__)
 
-# ── API configuration ─────────────────────────────────────────────────────────
+_ODDS_API_BASE    = "https://api.the-odds-api.com/v4"
+_ODDS_SPORT       = "soccer_fifa_world_cup"
 _FOOTBALL_DATA_BASE = "https://api.football-data.org/v4"
-_ODDS_API_BASE = "https://api.the-odds-api.com/v4"
-_ODDS_SPORT = "soccer_fifa_world_cup"
 
-# Cache TTL: 30 minutes for both (protects Odds API 500 req/month limit)
-_CACHE_TTL = 30 * 60
+_CACHE_TTL        = 30 * 60   # 30-minute cache for all live calls
+_ESPN_SCOREBOARD  = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard"
+_ESPN_STANDINGS   = "https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings"
+
+# WC 2026 date range for fetching the full group stage schedule
+_WC_START = "20260611"
+_WC_END   = "20260703"
 
 
 def _get_secret(name: str) -> str | None:
-    """Try to get a secret from Streamlit secrets, then environment variables.
-
-    Streamlit secrets take priority (for Streamlit Cloud deployment).
-    Falls back to env vars for local development.
-
-    Returns None if the key is not found anywhere.
-    """
-    # Try Streamlit secrets (only available inside a Streamlit app context)
+    """Return secret from Streamlit secrets or environment variable."""
     try:
         import streamlit as st
         val = st.secrets.get(name)
         if val:
             return str(val)
     except Exception:
-        pass  # Not running in a Streamlit context (e.g., during pytest)
-
-    # Fall back to environment variables
+        pass
     return os.environ.get(name) or None
 
 
 def is_demo_mode() -> bool:
-    """Return True if the app is running without live API keys.
-
-    In demo mode: bundled WC2026 schedule + realistic demo odds are used.
-    In live mode: real match results and bookmaker odds are fetched.
+    """Always False — ESPN provides live data with no key required.
+    Kept for backwards compatibility; UI no longer shows a demo banner.
     """
-    fd_key = _get_secret("FOOTBALL_DATA_API_KEY")
-    return fd_key is None
+    return False
 
 
-# ─── Football Data Client ─────────────────────────────────────────────────────
+# ─── Team name normalisation ──────────────────────────────────────────────────
+
+_TEAM_NAME_MAP: dict[str, str] = {
+    # ESPN / football-data.org → internal names
+    "UNITED STATES":                "USA",
+    "KOREA REPUBLIC":               "SOUTH KOREA",
+    "REPUBLIC OF KOREA":            "SOUTH KOREA",
+    "IR IRAN":                      "IRAN",
+    "ISLAMIC REPUBLIC OF IRAN":     "IRAN",
+    "CÔTE D'IVOIRE":                "IVORY COAST",
+    "COTE D'IVOIRE":                "IVORY COAST",
+    "CURAÇAO":                      "CURACAO",
+    "CURACAO":                      "CURACAO",
+    "CAPE VERDE":                   "CAPE VERDE ISLANDS",
+    "CAPE VERDE ISLANDS":           "CAPE VERDE ISLANDS",
+    "CONGO DR":                     "CONGO DR",
+    "DR CONGO":                     "CONGO DR",
+    "DEMOCRATIC REPUBLIC OF CONGO": "CONGO DR",
+    "BOSNIA-HERZEGOVINA":           "BOSNIA-HERZEGOVINA",
+    "BOSNIA AND HERZEGOVINA":       "BOSNIA-HERZEGOVINA",
+    "TÜRKIYE":                      "TURKEY",
+    "TURKEY":                       "TURKEY",
+    "NORTH MACEDONIA":              "NORTH MACEDONIA",
+    "TRINIDAD AND TOBAGO":          "TRINIDAD & TOBAGO",
+    "REPUBLIC OF IRELAND":          "IRELAND",
+}
+
+
+def _normalize_team(name: str) -> str:
+    upper = name.upper().strip()
+    return _TEAM_NAME_MAP.get(upper, upper)
+
+
+def _normalize_group(raw: str) -> str:
+    """'GROUP_A' or 'Group A' → 'A'. Returns '' for non-group stages."""
+    if not raw:
+        return ""
+    upper = raw.upper().replace("GROUP_", "").replace("GROUP ", "").strip()
+    return upper if len(upper) == 1 and upper.isalpha() else ""
+
+
+def _normalise_stage(raw: str) -> str:
+    mapping = {
+        "GROUP_STAGE":    "GROUP",
+        "ROUND_OF_32":    "R32",
+        "ROUND_OF_16":    "R16",
+        "QUARTER_FINALS": "QF",
+        "SEMI_FINALS":    "SF",
+        "THIRD_PLACE":    "SF",
+        "FINAL":          "FINAL",
+    }
+    return mapping.get(raw.upper(), "GROUP")
+
+
+def _team_to_group(team: str, groups: dict[str, list[str]]) -> str:
+    """Reverse-lookup group letter for a team name."""
+    for letter, teams in groups.items():
+        if team in teams:
+            return letter
+    return ""
+
+
+# ─── ESPN Client (PRIMARY — no API key) ───────────────────────────────────────
+
+class ESPNClient:
+    """Client for ESPN's public (undocumented but stable) football endpoints.
+
+    No API key or registration required. Rate-limits are generous for a
+    single-app use case; results are cached for 30 minutes.
+
+    Endpoints used:
+      Scoreboard: site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard
+      Standings:  site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings
+    """
+
+    def _get(self, url: str, params: dict | None = None, cache_key: str | None = None) -> dict | None:
+        key = cache_key or f"espn_{url}_{params}"
+        cached = get_cached(key)
+        if cached is not None:
+            return cached
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            set_cached(key, data, ttl_seconds=_CACHE_TTL)
+            return data
+        except Exception as exc:
+            logger.warning("ESPN request failed (%s): %s", url, exc)
+            return None
+
+    def get_wc_standings(self) -> dict[str, list[dict]] | None:
+        """Return live group standings.
+
+        Returns dict keyed by group letter ("A"…"L"), each value a list
+        of team dicts sorted by standing position:
+          {"team": "ARGENTINA", "pts": 3, "gp": 1, "gd": 3, "gf": 3, "ga": 0}
+
+        Returns None on failure (fall back to RESULTS_SO_FAR).
+        """
+        data = self._get(_ESPN_STANDINGS, cache_key="espn_wc_standings")
+        if not data:
+            return None
+
+        result: dict[str, list[dict]] = {}
+        for group in data.get("children", []):
+            raw_name = group.get("name", "")  # e.g. "Group A"
+            letter = raw_name.replace("Group ", "").strip()
+            if not letter or len(letter) != 1:
+                continue
+
+            entries = []
+            for e in group.get("standings", {}).get("entries", []):
+                team_name = _normalize_team(e.get("team", {}).get("displayName", ""))
+                stats = {
+                    s["name"]: s.get("displayValue", s.get("value", 0))
+                    for s in e.get("stats", [])
+                }
+                entries.append({
+                    "team": team_name,
+                    "pts":  int(float(stats.get("points", 0))),
+                    "gp":   int(float(stats.get("gamesPlayed", 0))),
+                    "gf":   int(float(stats.get("pointsFor", 0))),
+                    "ga":   int(float(stats.get("pointsAgainst", 0))),
+                    "gd":   int(float(stats.get("pointDifferential", 0))),
+                    "w":    int(float(stats.get("wins", 0))),
+                    "d":    int(float(stats.get("ties", 0))),
+                    "l":    int(float(stats.get("losses", 0))),
+                })
+            result[letter] = entries
+
+        logger.info("ESPN standings: %d groups loaded", len(result))
+        return result if result else None
+
+    def get_live_groups(self) -> dict[str, list[str]] | None:
+        """Return group assignments derived from live standings."""
+        standings = self.get_wc_standings()
+        if not standings:
+            return None
+        return {letter: [e["team"] for e in entries] for letter, entries in standings.items()}
+
+    def get_wc_matches(self) -> list[dict]:
+        """Return all WC 2026 group stage fixtures with live scores.
+
+        Fetches the full date range at once and normalises to our internal
+        format. Results are cached for 30 minutes.
+        """
+        data = self._get(
+            _ESPN_SCOREBOARD,
+            params={"dates": f"{_WC_START}-{_WC_END}", "limit": 200},
+            cache_key="espn_wc_matches_full",
+        )
+        if not data:
+            logger.warning("ESPN scoreboard unavailable — using bundled schedule")
+            return SCHEDULE
+
+        # Build a reverse-lookup from live standings so we can tag matches with group
+        live_groups = self.get_live_groups() or GROUPS
+
+        normalised: list[dict] = []
+        for event in data.get("events", []):
+            comp = event.get("competitions", [{}])[0]
+            competitors = comp.get("competitors", [])
+            status_type = comp.get("status", {}).get("type", {})
+
+            home_data = next((c for c in competitors if c.get("homeAway") == "home"), {})
+            away_data = next((c for c in competitors if c.get("homeAway") == "away"), {})
+
+            home = _normalize_team(home_data.get("team", {}).get("displayName", ""))
+            away = _normalize_team(away_data.get("team", {}).get("displayName", ""))
+            if not home or not away:
+                continue
+
+            completed = status_type.get("completed", False)
+            home_score = int(home_data.get("score", 0)) if completed else None
+            away_score = int(away_data.get("score", 0)) if completed else None
+
+            utc_date = event.get("date", "")[:10]
+            venue = comp.get("venue", {}).get("fullName", "")
+
+            group = _team_to_group(home, live_groups) or _team_to_group(away, live_groups)
+
+            normalised.append({
+                "date":       utc_date,
+                "home":       home,
+                "away":       away,
+                "home_score": home_score,
+                "away_score": away_score,
+                "stage":      "GROUP",
+                "group":      group,
+                "venue":      venue,
+                "status":     status_type.get("name", ""),
+            })
+
+        logger.info("ESPN: fetched %d WC fixtures", len(normalised))
+        return normalised if normalised else SCHEDULE
+
+    def get_completed_matches(self) -> list[dict]:
+        """Return only finished matches with scores."""
+        matches = self.get_wc_matches()
+        return [m for m in matches if m.get("home_score") is not None]
+
+
+# ─── Football Data Client (SECONDARY — optional enrichment) ──────────────────
 
 class FootballDataClient:
-    """Client for football-data.org API.
+    """Client for football-data.org API (optional — adds group labels).
 
-    Free tier: 10 requests/minute, all competitions.
-    WC 2026 competition code: "WC"
-
-    Documentation: https://www.football-data.org/documentation/quickstart
+    If FOOTBALL_DATA_API_KEY is not set, this client is a no-op and
+    ESPNClient handles all match data.
     """
 
     def __init__(self) -> None:
         self._api_key = _get_secret("FOOTBALL_DATA_API_KEY")
-        self._demo   = self._api_key is None
+        self._demo    = self._api_key is None
 
     def _get(self, endpoint: str, params: dict | None = None) -> dict | None:
-        """Make an authenticated GET request with caching.
-
-        Returns None on any error (network, auth, rate limit).
-        """
         if self._demo:
             return None
-
         cache_key = f"fd_{endpoint}_{params}"
         cached = get_cached(cache_key)
         if cached is not None:
             return cached
-
         url = f"{_FOOTBALL_DATA_BASE}/{endpoint}"
-        headers = {"X-Auth-Token": self._api_key}
-
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            resp = requests.get(url, headers={"X-Auth-Token": self._api_key}, params=params, timeout=10)
             resp.raise_for_status()
             data = resp.json()
             set_cached(cache_key, data, ttl_seconds=_CACHE_TTL)
@@ -145,74 +313,38 @@ class FootballDataClient:
             return None
 
     def get_wc_matches(self) -> list[dict]:
-        """Return all 2026 WC matches with results/scores.
-
-        Combines live API data (when available) with the bundled schedule.
-        Returns normalised list matching SCHEDULE format.
-        """
         if self._demo:
-            logger.debug("Demo mode: returning bundled WC schedule")
             return SCHEDULE
-
         data = self._get("competitions/WC/matches", {"season": "2026"})
         if data is None:
-            logger.info("football-data.org unavailable — using bundled schedule")
             return SCHEDULE
-
-        # Normalise API response to our internal format
         normalised: list[dict] = []
         for m in data.get("matches", []):
             home = _normalize_team(m.get("homeTeam", {}).get("name", ""))
             away = _normalize_team(m.get("awayTeam", {}).get("name", ""))
             score = m.get("score", {}).get("fullTime", {})
-            status = m.get("status", "")
-            utc_date = m.get("utcDate", "")[:10]  # YYYY-MM-DD
-
-            home_score = score.get("home")
-            away_score = score.get("away")
-            stage_raw  = m.get("stage", "GROUP_STAGE")
-            group_raw  = m.get("group", "")
-
             normalised.append({
-                "date":       utc_date,
+                "date":       m.get("utcDate", "")[:10],
                 "home":       home,
                 "away":       away,
-                "home_score": home_score,
-                "away_score": away_score,
-                "stage":      _normalise_stage(stage_raw),
-                "group":      _normalize_group(group_raw),
+                "home_score": score.get("home"),
+                "away_score": score.get("away"),
+                "stage":      _normalise_stage(m.get("stage", "GROUP_STAGE")),
+                "group":      _normalize_group(m.get("group", "")),
                 "venue":      m.get("venue", ""),
-                "status":     status,
+                "status":     m.get("status", ""),
             })
-
         return normalised if normalised else SCHEDULE
 
     def get_completed_matches(self) -> list[dict]:
-        """Return only matches that have been played (with scores).
-
-        Used to update ELO ratings with actual tournament results.
-        Falls back to RESULTS_SO_FAR in demo mode.
-        """
         if self._demo:
             return RESULTS_SO_FAR
-
         matches = self.get_wc_matches()
-        return [
-            m for m in matches
-            if m.get("home_score") is not None
-            and m.get("away_score") is not None
-        ]
+        return [m for m in matches if m.get("home_score") is not None]
 
     def get_live_groups(self) -> dict[str, list[str]] | None:
-        """Derive group assignments from live API fixture data.
-
-        Returns a dict like {"A": ["TEAM1", "TEAM2", ...], ...} built from
-        the group field in each GROUP stage match.
-        Returns None in demo mode or if the API call fails.
-        """
         if self._demo:
             return None
-
         matches = self.get_wc_matches()
         groups: dict[str, set[str]] = {}
         for m in matches:
@@ -221,55 +353,27 @@ class FootballDataClient:
                 continue
             groups.setdefault(g, set()).add(m["home"])
             groups.setdefault(g, set()).add(m["away"])
-
         if not groups:
-            logger.warning("get_live_groups: no group data in API response — using bundled GROUPS")
             return None
-
         return {k: sorted(v) for k, v in sorted(groups.items())}
 
 
-# ─── Odds API Client ─────────────────────────────────────────────────────────
+# ─── Odds API Client ──────────────────────────────────────────────────────────
 
 class OddsAPIClient:
-    """Client for The Odds API (the-odds-api.com).
-
-    Free tier: 500 requests/month.
-    With 30-min cache: ≈ 96 requests/day max = ~2880/month
-    That's still over the limit at full activity — we cap at 400/month via
-    the request counter in the cache layer.
-
-    Documentation: https://the-odds-api.com/liveapi/guides/v4/
-    """
+    """Client for The Odds API (the-odds-api.com). 500 requests/month free."""
 
     def __init__(self) -> None:
         self._api_key = _get_secret("ODDS_API_KEY")
-        self._demo   = self._api_key is None
+        self._demo    = self._api_key is None
 
     def get_wc_odds(
         self,
         regions: str = "uk,eu",
         markets: str = "h2h,totals",
-        bookmakers: str = "pinnacle,bet365,betfair_ex_eu",
     ) -> dict[str, dict[str, float]]:
-        """Return odds for upcoming WC matches.
-
-        Returns
-        -------
-        dict keyed by "{HOME}_vs_{AWAY}" with sub-dicts:
-            {"home": odds, "draw": odds, "away": odds,
-             "over_25": odds, "btts": odds}
-
-        Falls back to DEMO_ODDS if API is unavailable.
-
-        HOW TO DEBUG:
-            If odds look wrong, print the raw API response:
-            data = client._get_raw()
-            import json
-            print(json.dumps(data[:2], indent=2))
-        """
+        """Return bookmaker odds. Falls back to DEMO_ODDS if no key."""
         if self._demo:
-            logger.debug("Demo mode: returning bundled demo odds")
             return DEMO_ODDS
 
         cache_key = "odds_wc_upcoming"
@@ -277,166 +381,68 @@ class OddsAPIClient:
         if cached is not None:
             return cached
 
-        params = {
-            "apiKey":     self._api_key,
-            "regions":    regions,
-            "markets":    markets,
-            "oddsFormat": "decimal",
-        }
-
         try:
-            url = f"{_ODDS_API_BASE}/sports/{_ODDS_SPORT}/odds/"
-            resp = requests.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-
-            raw = resp.json()
-            logger.info(
-                "Odds API: fetched %d events. Remaining requests: %s",
-                len(raw),
-                resp.headers.get("x-requests-remaining", "?"),
+            resp = requests.get(
+                f"{_ODDS_API_BASE}/sports/{_ODDS_SPORT}/odds/",
+                params={"apiKey": self._api_key, "regions": regions,
+                        "markets": markets, "oddsFormat": "decimal"},
+                timeout=15,
             )
-
+            resp.raise_for_status()
+            raw = resp.json()
+            logger.info("Odds API: %d events, remaining: %s",
+                        len(raw), resp.headers.get("x-requests-remaining", "?"))
             result = _parse_odds_api_response(raw)
             set_cached(cache_key, result, ttl_seconds=_CACHE_TTL)
             return result
-
         except requests.HTTPError as exc:
-            if exc.response.status_code == 401:
-                logger.error("Odds API: Invalid API key — check ODDS_API_KEY")
-            elif exc.response.status_code == 422:
-                logger.error("Odds API: No odds available for this sport/market")
-            else:
-                logger.warning("Odds API HTTP error: %s", exc)
+            logger.warning("Odds API HTTP error: %s", exc)
             return DEMO_ODDS
-
         except Exception as exc:
-            logger.warning("Odds API request failed: %s — using demo odds", exc)
+            logger.warning("Odds API failed: %s", exc)
             return DEMO_ODDS
 
     def get_match_odds(self, home: str, away: str) -> dict[str, float] | None:
-        """Return odds for a specific match. Returns None if not found."""
         all_odds = self.get_wc_odds()
         key = f"{home}_vs_{away}"
         if key in all_odds:
             return all_odds[key]
-        # Try reversed direction
-        rev_key = f"{away}_vs_{home}"
-        if rev_key in all_odds:
-            o = all_odds[rev_key].copy()
+        rev = f"{away}_vs_{home}"
+        if rev in all_odds:
+            o = all_odds[rev].copy()
             o["home"], o["away"] = o["away"], o["home"]
             return o
-        return get_demo_odds(home, away)  # last resort: demo odds
+        return get_demo_odds(home, away)
 
 
-# ─── Private helpers ─────────────────────────────────────────────────────────
-
-# Maps football-data.org / other API name variants → our internal names
-_TEAM_NAME_MAP: dict[str, str] = {
-    "UNITED STATES":              "USA",
-    "KOREA REPUBLIC":             "SOUTH KOREA",
-    "REPUBLIC OF KOREA":          "SOUTH KOREA",
-    "IR IRAN":                    "IRAN",
-    "ISLAMIC REPUBLIC OF IRAN":   "IRAN",
-    "CÔTE D'IVOIRE":              "IVORY COAST",
-    "COTE D'IVOIRE":              "IVORY COAST",
-    "CURAÇAO":                    "CURACAO",
-    "CURACAO":                    "CURACAO",
-    "CAPE VERDE":                 "CAPE VERDE ISLANDS",
-    "CAPE VERDE ISLANDS":         "CAPE VERDE ISLANDS",
-    "CONGO DR":                   "CONGO DR",
-    "DR CONGO":                   "CONGO DR",
-    "DEMOCRATIC REPUBLIC OF CONGO": "CONGO DR",
-    "BOSNIA-HERZEGOVINA":         "BOSNIA-HERZEGOVINA",
-    "BOSNIA AND HERZEGOVINA":     "BOSNIA-HERZEGOVINA",
-    "NORTH MACEDONIA":            "NORTH MACEDONIA",
-    "TRINIDAD AND TOBAGO":        "TRINIDAD & TOBAGO",
-    "REPUBLIC OF IRELAND":        "IRELAND",
-    "CHINESE TAIPEI":             "CHINESE TAIPEI",
-}
-
-
-def _normalize_team(name: str) -> str:
-    """Normalize a team name from the API to our internal format."""
-    upper = name.upper().strip()
-    return _TEAM_NAME_MAP.get(upper, upper)
-
-
-def _normalize_group(raw: str) -> str:
-    """Convert 'GROUP_A' or 'Group A' → 'A'. Returns '' if not a group stage."""
-    if not raw:
-        return ""
-    upper = raw.upper().replace("GROUP_", "").replace("GROUP ", "").strip()
-    return upper if len(upper) == 1 and upper.isalpha() else ""
-
-
-def _normalise_stage(raw: str) -> str:
-    """Convert football-data.org stage names to our internal codes."""
-    mapping = {
-        "GROUP_STAGE":         "GROUP",
-        "ROUND_OF_32":         "R32",
-        "ROUND_OF_16":         "R16",
-        "QUARTER_FINALS":      "QF",
-        "SEMI_FINALS":         "SF",
-        "THIRD_PLACE":         "SF",  # treat 3rd place similarly
-        "FINAL":               "FINAL",
-    }
-    return mapping.get(raw.upper(), "GROUP")
-
+# ─── Private helpers ──────────────────────────────────────────────────────────
 
 def _parse_odds_api_response(raw: list[dict]) -> dict[str, dict[str, float]]:
-    """Parse The Odds API response into our internal odds format.
-
-    The Odds API returns events with nested bookmakers and markets.
-    We take the best available odds across all listed bookmakers.
-
-    HOW TO DEBUG:
-        If all odds are 0.0: the market structure may have changed in API v5+
-        Check: raw[0]["bookmakers"][0]["markets"] for current structure
-    """
     result: dict[str, dict[str, float]] = {}
-
     for event in raw:
-        home_raw = event.get("home_team", "").upper()
-        away_raw = event.get("away_team", "").upper()
+        home_raw = _normalize_team(event.get("home_team", ""))
+        away_raw = _normalize_team(event.get("away_team", ""))
         key = f"{home_raw}_vs_{away_raw}"
-
-        # Aggregate best odds across bookmakers (take the maximum = best for punter)
-        best_odds: dict[str, float] = {}
-
+        best: dict[str, float] = {}
         for bookmaker in event.get("bookmakers", []):
             for market in bookmaker.get("markets", []):
-                market_key = market.get("key", "")
-
-                if market_key == "h2h":
-                    # Head-to-head: home / draw / away
+                mk = market.get("key", "")
+                if mk == "h2h":
                     for outcome in market.get("outcomes", []):
-                        name = outcome.get("name", "").upper()
-                        price = float(outcome.get("price", 0))
-
-                        if home_raw in name:
-                            best_odds["home"] = max(best_odds.get("home", 0), price)
-                        elif away_raw in name:
-                            best_odds["away"] = max(best_odds.get("away", 0), price)
-                        elif "DRAW" in name:
-                            best_odds["draw"] = max(best_odds.get("draw", 0), price)
-
-                elif market_key == "totals":
-                    # Over/Under goals
+                        n = _normalize_team(outcome.get("name", ""))
+                        p = float(outcome.get("price", 0))
+                        if n == home_raw:
+                            best["home"] = max(best.get("home", 0), p)
+                        elif n == away_raw:
+                            best["away"] = max(best.get("away", 0), p)
+                        elif "DRAW" in outcome.get("name", "").upper():
+                            best["draw"] = max(best.get("draw", 0), p)
+                elif mk == "totals":
                     for outcome in market.get("outcomes", []):
-                        name  = outcome.get("name", "").upper()
                         point = outcome.get("point", 0)
-                        price = float(outcome.get("price", 0))
-
-                        if abs(point - 2.5) < 0.01 and "OVER" in name:
-                            best_odds["over_25"] = max(best_odds.get("over_25", 0), price)
-                        elif abs(point - 2.5) < 0.01 and "UNDER" in name:
-                            pass  # we don't recommend Under bets currently
-
-        # Only add if we have at least 1X2 odds
-        if "home" in best_odds and "draw" in best_odds and "away" in best_odds:
-            # Fill in BTTS with a typical estimate if not available
-            if "btts" not in best_odds:
-                best_odds["btts"] = 1.80  # typical BTTS market
-            result[key] = best_odds
-
+                        if abs(point - 2.5) < 0.01 and "OVER" in outcome.get("name", "").upper():
+                            best["over_25"] = max(best.get("over_25", 0), float(outcome.get("price", 0)))
+        if "home" in best and "draw" in best and "away" in best:
+            best.setdefault("btts", 1.80)
+            result[key] = best
     return result
