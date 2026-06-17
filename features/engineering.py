@@ -131,14 +131,51 @@ class FeatureEngineer:
         dc_model: object,       # DixonColesModel instance
         team_meta: dict,        # from wc2026_teams.TEAM_META
     ) -> None:
-        # Pre-parse dates and pre-sort once so form lookups never repeat this work
+        # Pre-parse dates, uppercase teams, and pre-sort once
         df = historical_df.copy()
         df["date"] = pd.to_datetime(df["date"])
+        df["home_team"] = df["home_team"].str.upper()
+        df["away_team"] = df["away_team"].str.upper()
         df = df.sort_values("date").reset_index(drop=True)
         self.df       = df
         self.elo      = elo_system
         self.dc       = dc_model
         self.meta     = team_meta
+
+        # Pre-group per team: each form lookup scans ~100 rows instead of 3000
+        all_teams = sorted(set(df["home_team"]) | set(df["away_team"]))
+        self._team_df: dict[str, pd.DataFrame] = {
+            team: df[(df["home_team"] == team) | (df["away_team"] == team)].reset_index(drop=True)
+            for team in all_teams
+        }
+
+        # Convert per-team data to numpy arrays — eliminates pandas overhead on 27k calls
+        self._team_arr: dict[str, dict] = {}
+        for team, tdf in self._team_df.items():
+            self._team_arr[team] = {
+                "dates":      tdf["date"].values.astype("int64"),   # nanoseconds
+                "is_home":    tdf["home_team"].values == team,
+                "home_score": tdf["home_score"].values.astype(float),
+                "away_score": tdf["away_score"].values.astype(float),
+            }
+
+        # Pre-build H2H cache as numpy arrays for same reason
+        self._h2h_arr: dict[tuple, dict] = {}
+        for i, t1 in enumerate(all_teams):
+            for t2 in all_teams[i+1:]:
+                mask = (
+                    ((df["home_team"] == t1) & (df["away_team"] == t2)) |
+                    ((df["home_team"] == t2) & (df["away_team"] == t1))
+                )
+                pdf = df[mask]
+                arr = {
+                    "dates":      pdf["date"].values.astype("int64"),
+                    "is_home_t1": pdf["home_team"].values == t1,
+                    "home_score": pdf["home_score"].values.astype(float),
+                    "away_score": pdf["away_score"].values.astype(float),
+                }
+                self._h2h_arr[(t1, t2)] = arr
+                self._h2h_arr[(t2, t1)] = arr
 
     def build_features(
         self,
@@ -184,22 +221,39 @@ class FeatureEngineer:
         away_atk = self.dc.attack_strengths.get(away, 0.0)
         away_def = self.dc.defense_strengths.get(away, 0.0)
 
-        # ── Form features (walk-forward: only data before match_date) ─────
-        home_form_5  = calculate_form(home, self.df, match_date, n_matches=5)
-        away_form_5  = calculate_form(away, self.df, match_date, n_matches=5)
-        home_form_10 = calculate_form(home, self.df, match_date, n_matches=10)
-        away_form_10 = calculate_form(away, self.df, match_date, n_matches=10)
+        # Convert match_date once to int64 nanoseconds for all numpy fast-paths
+        match_date_ns = int(pd.Timestamp(match_date).value)
 
-        # ── Head-to-head ──────────────────────────────────────────────────
-        h2h = h2h_record(home, away, self.df, n_meetings=5)
+        home_arr = self._team_arr.get(home)
+        away_arr = self._team_arr.get(away)
 
-        # ── Goal statistics ───────────────────────────────────────────────
-        home_gs = calculate_goals_stats(home, self.df, match_date, n_matches=10)
-        away_gs = calculate_goals_stats(away, self.df, match_date, n_matches=10)
-
-        # ── Rest / fatigue ────────────────────────────────────────────────
-        home_rest = days_since_last_match(home, self.df, match_date)
-        away_rest = days_since_last_match(away, self.df, match_date)
+        # Fall back to slow pandas path for unknown teams (e.g. live predictions
+        # for teams not seen during training — very rare)
+        if home_arr is None or away_arr is None:
+            home_df = self._team_df.get(home, self.df)
+            away_df = self._team_df.get(away, self.df)
+            cutoff  = pd.Timestamp(match_date)
+            home_form_5  = calculate_form(home, home_df, match_date, n_matches=5)
+            away_form_5  = calculate_form(away, away_df, match_date, n_matches=5)
+            home_form_10 = calculate_form(home, home_df, match_date, n_matches=10)
+            away_form_10 = calculate_form(away, away_df, match_date, n_matches=10)
+            h2h_df = pd.concat([home_df, away_df]).drop_duplicates()
+            h2h = h2h_record(home, away, h2h_df, n_meetings=5)
+            home_gs = calculate_goals_stats(home, home_df, match_date, n_matches=10)
+            away_gs = calculate_goals_stats(away, away_df, match_date, n_matches=10)
+            home_rest = days_since_last_match(home, home_df, match_date)
+            away_rest = days_since_last_match(away, away_df, match_date)
+        else:
+            # ── Pure-numpy fast paths (zero pandas overhead) ──────────────
+            home_form_5  = self._form_fast(home_arr, match_date_ns, 5)
+            away_form_5  = self._form_fast(away_arr, match_date_ns, 5)
+            home_form_10 = self._form_fast(home_arr, match_date_ns, 10)
+            away_form_10 = self._form_fast(away_arr, match_date_ns, 10)
+            h2h          = self._h2h_fast(home, away, 5)
+            home_gs      = self._goals_fast(home_arr, match_date_ns, 10)
+            away_gs      = self._goals_fast(away_arr, match_date_ns, 10)
+            home_rest    = self._rest_fast(home_arr, match_date_ns)
+            away_rest    = self._rest_fast(away_arr, match_date_ns)
 
         # ── Tournament context ────────────────────────────────────────────
         stage_enc  = STAGE_ENCODING.get(stage, 0)
@@ -236,6 +290,55 @@ class FeatureEngineer:
             "elo_diff_sq":            elo_diff_sq,
             "rank_diff_sq":           rank_diff_sq,
         }
+
+    # ── Pure-numpy fast-path helpers — called 27k times during training ──────────
+    # All operate on pre-built int64 nanosecond arrays (zero pandas overhead).
+    # match_date_ns must be pd.Timestamp(match_date).value (int64 nanoseconds).
+
+    def _form_fast(self, arr: dict, match_date_ns: int, n: int) -> float:
+        idx = np.where(arr["dates"] < match_date_ns)[0]
+        if len(idx) == 0:
+            return 0.5
+        idx = idx[-n:]
+        is_home = arr["is_home"][idx]
+        hs, as_ = arr["home_score"][idx], arr["away_score"][idx]
+        wins  = (is_home & (hs > as_)) | (~is_home & (as_ > hs))
+        points = float(wins.sum() * 3 + (hs == as_).sum())
+        return points / (len(idx) * 3.0)
+
+    def _goals_fast(self, arr: dict, match_date_ns: int, n: int) -> dict:
+        idx = np.where(arr["dates"] < match_date_ns)[0]
+        if len(idx) == 0:
+            return {"scored_avg": 1.2, "conceded_avg": 1.2, "goal_diff_avg": 0.0}
+        idx = idx[-n:]
+        k = len(idx)
+        w = np.array([0.85 ** i for i in range(k - 1, -1, -1)])
+        w /= w.sum()
+        is_home = arr["is_home"][idx]
+        hs, as_ = arr["home_score"][idx], arr["away_score"][idx]
+        scored   = np.where(is_home, hs, as_)
+        conceded = np.where(is_home, as_, hs)
+        sc = float(np.dot(scored, w))
+        cc = float(np.dot(conceded, w))
+        return {"scored_avg": round(sc, 3), "conceded_avg": round(cc, 3), "goal_diff_avg": round(sc - cc, 3)}
+
+    def _rest_fast(self, arr: dict, match_date_ns: int) -> int:
+        idx = np.where(arr["dates"] < match_date_ns)[0]
+        if len(idx) == 0:
+            return 7
+        last_ns = arr["dates"][idx[-1]]
+        days = int((match_date_ns - last_ns) / 86_400_000_000_000)
+        return max(0, days)
+
+    def _h2h_fast(self, home: str, away: str, n: int) -> dict:
+        arr = self._h2h_arr.get((home, away))
+        if arr is None or len(arr["dates"]) == 0:
+            return {"home_wins": 0, "draws": 0, "away_wins": 0}
+        hs, as_ = arr["home_score"][-n:], arr["away_score"][-n:]
+        is_home_t1 = arr["is_home_t1"][-n:]
+        draws = int((hs == as_).sum())
+        hw = int(((is_home_t1 & (hs > as_)) | (~is_home_t1 & (as_ > hs))).sum())
+        return {"home_wins": hw, "draws": draws, "away_wins": len(hs) - draws - hw}
 
     def build_training_set(
         self,
