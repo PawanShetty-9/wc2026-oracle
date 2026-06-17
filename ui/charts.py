@@ -40,9 +40,10 @@ _LAYOUT_BASE = dict(
     plot_bgcolor=PANEL_BG,
     font=dict(family="Share Tech Mono, monospace", color=TEXT, size=12),
     margin=dict(l=20, r=20, t=40, b=20),
-    xaxis=dict(gridcolor=GRID, zerolinecolor=GRID, color=TEXT),
-    yaxis=dict(gridcolor=GRID, zerolinecolor=GRID, color=TEXT),
 )
+
+# Reusable axis style — merge into per-chart xaxis/yaxis dicts as needed
+_AX = dict(gridcolor=GRID, zerolinecolor=GRID, color=TEXT)
 
 
 def probability_bar_chart(
