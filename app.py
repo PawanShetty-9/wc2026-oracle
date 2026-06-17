@@ -31,6 +31,7 @@ HOW TO DEBUG:
     root directory (WC2026Oracle/) with: streamlit run app.py
   - If Streamlit shows ImportError: ensure requirements.txt is installed
   - For verbose model logs: set LOG_LEVEL=DEBUG env var before starting
+"""
 
 from __future__ import annotations
 

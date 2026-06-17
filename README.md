@@ -1,4 +1,4 @@
-# ⬡ AetherMind — World Cup 2026 Neural Betting Oracle
+# ⬡ WC2026 Neural Betting Oracle
 
 > **Disclaimer**: All predictions are for educational and entertainment purposes only. This is not financial advice. Gamble responsibly.
 
@@ -10,8 +10,8 @@ A state-of-the-art World Cup 2026 betting predictor built with Dixon-Coles, ELO,
 
 ```bash
 # 1. Clone
-git clone https://github.com/pawanshetty-9/aethermind.git
-cd aethermind
+git clone https://github.com/pawanshetty-9/wc2026-oracle.git
+cd wc2026-oracle
 
 # 2. Create virtual environment
 python -m venv venv
@@ -19,14 +19,14 @@ source venv/bin/activate       # Linux/Mac
 # venv\Scripts\activate        # Windows
 
 # 3. Install dependencies
-pip install -r betting/requirements.txt
+pip install -r requirements.txt
 
 # 4. Run (no API keys needed — demo mode)
-PYTHONPATH=. streamlit run betting/app.py
+streamlit run app.py
 # Opens at http://localhost:8501
 
 # 5. Run tests
-PYTHONPATH=. python -m pytest betting/tests/ -v
+python -m pytest tests/ -v
 ```
 
 ---
@@ -34,7 +34,7 @@ PYTHONPATH=. python -m pytest betting/tests/ -v
 ## Architecture
 
 ```
-betting/
+wc2026-oracle/
 ├── app.py                      # Streamlit entry point (5 pages)
 ├── requirements.txt
 ├── .streamlit/
@@ -136,7 +136,7 @@ stake = 0.25 × f* × bankroll   (25% fractional Kelly)
 Without keys, the app runs identically in demo mode. To enable live data:
 
 ```bash
-cp betting/.streamlit/secrets.toml.example betting/.streamlit/secrets.toml
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 ```
 
 Edit `secrets.toml`:
@@ -160,9 +160,9 @@ ODDS_API_KEY = "your_key"            # the-odds-api.com (500 req/month free)
 
 3. **New App** → configure:
    ```
-   Repository:  pawanshetty-9/aethermind
+   Repository:  pawanshetty-9/wc2026-oracle
    Branch:      main
-   Main file:   betting/app.py
+   Main file:   app.py
    ```
 
 4. **(Optional) Add secrets** — App settings → Secrets:
@@ -177,9 +177,9 @@ ODDS_API_KEY = "your_key"            # the-odds-api.com (500 req/month free)
 Every `git push` to `main` triggers an automatic redeploy (takes ~60 seconds).
 
 ### Updating World Cup results (demo mode)
-After each match day, edit `betting/data/wc2026_teams.py` → `RESULTS_SO_FAR` list, then push:
+After each match day, edit `data/wc2026_teams.py` → `RESULTS_SO_FAR` list, then push:
 ```bash
-git add betting/data/wc2026_teams.py
+git add data/wc2026_teams.py
 git commit -m "chore: add WC2026 Matchday 2 results"
 git push
 ```
@@ -190,13 +190,13 @@ git push
 
 ```bash
 # From repo root (no API keys needed)
-PYTHONPATH=. python -m pytest betting/tests/ -v
+python -m pytest tests/ -v
 
 # Individual test files
-PYTHONPATH=. python -m pytest betting/tests/test_elo.py -v
-PYTHONPATH=. python -m pytest betting/tests/test_dixon_coles.py -v
-PYTHONPATH=. python -m pytest betting/tests/test_kelly.py -v
-PYTHONPATH=. python -m pytest betting/tests/test_features.py -v
+python -m pytest tests/test_elo.py -v
+python -m pytest tests/test_dixon_coles.py -v
+python -m pytest tests/test_kelly.py -v
+python -m pytest tests/test_features.py -v
 ```
 
 ---
@@ -205,18 +205,18 @@ PYTHONPATH=. python -m pytest betting/tests/test_features.py -v
 
 | Issue | Fix |
 |-------|-----|
-| `ModuleNotFoundError: betting` | Run from repo root with `PYTHONPATH=. streamlit run betting/app.py` |
-| App shows "training models" forever | Check `betting/data/raw/` — bundled CSV may be missing |
+| `ModuleNotFoundError` | Run from repo root: `streamlit run app.py` |
+| App shows "training models" forever | Check `data/raw/` — bundled CSV may be missing |
 | Odds show "Demo" even with API key | Verify secret name is exactly `ODDS_API_KEY` in Streamlit Cloud UI |
-| XGBoost fails to train | Delete `betting/data/raw/xgb_model.joblib` and restart |
-| Streamlit Cloud can't find requirements | Confirm `betting/requirements.txt` exists next to `betting/app.py` |
-| `sqlite3.OperationalError` | Check that `betting/data/raw/` directory exists (gitignored but auto-created) |
+| XGBoost fails to train | Delete `data/raw/xgb_model.joblib` and restart |
+| Streamlit Cloud can't find requirements | Confirm `requirements.txt` exists at repo root |
+| `sqlite3.OperationalError` | Check that `data/raw/` directory exists (gitignored but auto-created) |
 
 ---
 
 ## Key Design Decisions
 
-- **Self-contained**: `betting/` never imports from `common/`, `ml/`, or `ingestion/`
+- **Self-contained**: no external module dependencies beyond `requirements.txt`
 - **Demo-first**: App is fully functional without any external API calls
 - **Walk-forward only**: All feature computation strictly avoids lookahead bias
 - **Thread-safe cache**: SQLite uses `threading.local()` for Streamlit's multi-threaded server
@@ -225,4 +225,4 @@ PYTHONPATH=. python -m pytest betting/tests/test_features.py -v
 
 ---
 
-*AetherMind v1.0 · 2026 · For educational use only · Not financial advice*
+*WC2026 Neural Betting Oracle v1.0 · 2026 · For educational use only · Not financial advice*
