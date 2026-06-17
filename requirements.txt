@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# World Cup 2026 Betting Predictor — Python dependencies
+# Install from the repo root: pip install -r betting/requirements.txt
+# Python 3.11+ required (uses match statements, tomllib, etc.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Data manipulation ────────────────────────────────────────────────────────
+pandas>=2.2,<3          # DataFrames for match history, feature tables
+numpy>=1.26,<3          # Array math, Poisson sampling, matrix ops
+
+# ── Statistics & optimisation (Dixon-Coles MLE) ──────────────────────────────
+scipy>=1.13,<2          # optimize.minimize (L-BFGS-B), stats.poisson
+
+# ── Machine learning ─────────────────────────────────────────────────────────
+scikit-learn>=1.5,<2    # IsotonicRegression calibration, train_test_split
+xgboost>=2.1,<3         # Gradient-boosted 3-class outcome classifier
+joblib>=1.4,<2          # Model serialisation (save/load XGBoost)
+
+# ── Web app & deployment ─────────────────────────────────────────────────────
+streamlit>=1.36,<2      # Interactive UI + Streamlit Cloud hosting
+plotly>=5.22,<6         # Interactive charts (probability bars, ELO, P&L)
+
+# ── HTTP clients (data APIs) ─────────────────────────────────────────────────
+requests>=2.32,<3       # football-data.org REST API
+httpx>=0.27,<1          # The Odds API (supports async, used synchronously here)
+
+# ── Background scheduling (cache refresh) ────────────────────────────────────
+apscheduler>=3.10,<4    # Background job to warm SQLite cache every 30 min
+                        # NOTE: use 3.x, NOT 4.x — breaking API change in 4.x
+
+# ── Testing ──────────────────────────────────────────────────────────────────
+pytest>=8.2,<9          # Test runner; all tests run offline (no API keys needed)
