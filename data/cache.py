@@ -82,6 +82,26 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             result       TEXT,             -- NULL=open, "WIN", "LOSS", "VOID"
             pnl          REAL             -- profit/loss in currency units
         );
+
+        -- Prediction history for model accuracy tracking
+        CREATE TABLE IF NOT EXISTS prediction_log (
+            match_id          TEXT PRIMARY KEY,
+            home_team         TEXT NOT NULL,
+            away_team         TEXT NOT NULL,
+            match_date        TEXT NOT NULL,
+            stage             TEXT NOT NULL,
+            pred_winner       TEXT NOT NULL,
+            home_prob         REAL NOT NULL,
+            draw_prob         REAL NOT NULL,
+            away_prob         REAL NOT NULL,
+            pred_home_goals   INTEGER,
+            pred_away_goals   INTEGER,
+            actual_result     TEXT,
+            actual_home_goals INTEGER,
+            actual_away_goals INTEGER,
+            correct           INTEGER,
+            logged_at         TEXT NOT NULL
+        );
     """)
     conn.commit()
 
@@ -266,4 +286,100 @@ def get_pnl_summary() -> dict:
         "total_staked":  round(total_staked, 2),
         "total_pnl":     round(total_pnl, 2),
         "roi_pct":       round(roi, 1),
+    }
+
+
+# ─── Prediction logging ──────────────────────────────────────────────────────
+
+def log_prediction(
+    match_id: str,
+    home_team: str,
+    away_team: str,
+    match_date: str,
+    stage: str,
+    pred_winner: str,
+    home_prob: float,
+    draw_prob: float,
+    away_prob: float,
+    pred_home_goals: int | None = None,
+    pred_away_goals: int | None = None,
+) -> None:
+    """Log a model prediction. Skips silently if match_id already exists."""
+    from datetime import datetime
+    conn = _get_conn()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO prediction_log
+          (match_id, home_team, away_team, match_date, stage, pred_winner,
+           home_prob, draw_prob, away_prob, pred_home_goals, pred_away_goals,
+           actual_result, actual_home_goals, actual_away_goals, correct, logged_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)
+        """,
+        (match_id, home_team, away_team, match_date, stage, pred_winner,
+         home_prob, draw_prob, away_prob, pred_home_goals, pred_away_goals,
+         datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+
+
+def settle_prediction(
+    match_id: str,
+    actual_result: str,
+    actual_home_goals: int,
+    actual_away_goals: int,
+) -> bool | None:
+    """Settle a prediction. actual_result: 'H'=home win, 'D'=draw, 'A'=away win.
+    Returns True if correct, False if wrong, None if match_id not found."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT pred_winner, home_team, away_team FROM prediction_log WHERE match_id = ?",
+        (match_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    pred_winner = row["pred_winner"]
+    home_team   = row["home_team"]
+    away_team   = row["away_team"]
+
+    if actual_result == "H":
+        actual_winner = home_team
+    elif actual_result == "A":
+        actual_winner = away_team
+    else:
+        actual_winner = "DRAW"
+
+    correct = 1 if pred_winner == actual_winner else 0
+    conn.execute(
+        """
+        UPDATE prediction_log
+        SET actual_result = ?, actual_home_goals = ?, actual_away_goals = ?, correct = ?
+        WHERE match_id = ?
+        """,
+        (actual_result, actual_home_goals, actual_away_goals, correct, match_id),
+    )
+    conn.commit()
+    return correct == 1
+
+
+def get_prediction_history() -> list[dict]:
+    """Return all logged predictions ordered by date (newest first)."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM prediction_log ORDER BY match_date DESC, logged_at DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_prediction_accuracy() -> dict:
+    """Return aggregate accuracy stats across all settled predictions."""
+    history = get_prediction_history()
+    settled = [h for h in history if h["actual_result"] is not None]
+    correct = [h for h in settled if h["correct"] == 1]
+    return {
+        "total":        len(history),
+        "settled":      len(settled),
+        "correct":      len(correct),
+        "pending":      len(history) - len(settled),
+        "accuracy_pct": round(len(correct) / len(settled) * 100, 1) if settled else 0.0,
     }

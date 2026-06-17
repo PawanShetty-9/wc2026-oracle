@@ -227,7 +227,7 @@ def load_all_models():
         - XGBoost ConvergenceWarning: harmless, model still works
     """
     from data.historical import load_training_data
-    from data.wc2026_teams import TEAM_META, RESULTS_SO_FAR
+    from data.wc2026_teams import TEAM_META, RESULTS_SO_FAR, GROUPS
     from models.elo import EloSystem
     from models.dixon_coles import DixonColesModel
     from models.xgboost_model import load_or_train_xgb
@@ -235,8 +235,31 @@ def load_all_models():
     from models.ensemble import EnsemblePredictor
     from features.engineering import FeatureEngineer
 
+    import numpy as np
+    import pandas as pd
     logger.info("Loading historical training data...")
     train_df = load_training_data(min_year=1993)
+
+    # Augment training data with actual WC 2026 results (24 real matches)
+    _wc_rows = []
+    for _r in RESULTS_SO_FAR:
+        _hs, _as = _r["home_score"], _r["away_score"]
+        _wc_rows.append({
+            "date":       _r["date"],
+            "home_team":  _r["home"],
+            "away_team":  _r["away"],
+            "home_score": _hs,
+            "away_score": _as,
+            "tournament": "FIFA World Cup",
+            "neutral":    True,
+            "outcome":    2 if _hs > _as else (0 if _hs < _as else 1),
+            "_source":    "wc2026_actual",
+        })
+    _wc_df = pd.DataFrame(_wc_rows)
+    _wc_df["date"] = pd.to_datetime(_wc_df["date"])
+    augmented_df = pd.concat([train_df, _wc_df], ignore_index=True).sort_values("date").reset_index(drop=True)
+    _sample_weight = np.ones(len(augmented_df))
+    _sample_weight[augmented_df["_source"] == "wc2026_actual"] = 10.0
 
     # ── ELO System ───────────────────────────────────────────────────────
     logger.info("Training ELO system...")
@@ -263,15 +286,15 @@ def load_all_models():
 
     # ── Feature Engineer ──────────────────────────────────────────────────
     eng = FeatureEngineer(
-        historical_df=train_df,
+        historical_df=augmented_df,
         elo_system=elo,
         dc_model=dc,
         team_meta=TEAM_META,
     )
 
     # ── XGBoost Classifier ────────────────────────────────────────────────
-    logger.info("Loading / training XGBoost model...")
-    xgb = load_or_train_xgb(eng, train_df)
+    logger.info("Loading / training XGBoost model (augmented with WC 2026 data)...")
+    xgb = load_or_train_xgb(eng, augmented_df, force_retrain=True, sample_weight=_sample_weight)
 
     # ── Calibrator (minimal — fitted on synthetic validation split) ───────
     calibrator = ProbabilityCalibrator()
@@ -285,6 +308,42 @@ def load_all_models():
         feature_engineer=eng,
         calibrator=calibrator,
     )
+
+    # ── Retrospective prediction accuracy for completed WC 2026 matches ───
+    from data.cache import log_prediction, settle_prediction
+    from datetime import date as _date
+    logger.info("Computing retrospective accuracy for %d completed WC matches...", len(RESULTS_SO_FAR))
+    for _result in RESULTS_SO_FAR:
+        _home = _result["home"]
+        _away = _result["away"]
+        _date_str = _result["date"]
+        _stage = _result["stage"]
+        _mid = f"{_home}_vs_{_away}_{_date_str}"
+        _group = next(
+            (g for g, teams in GROUPS.items() if _home in teams or _away in teams),
+            "",
+        )
+        try:
+            _match_date = _date.fromisoformat(_date_str)
+            _pred = predictor.predict(_home, _away, _match_date, _stage, _group)
+            log_prediction(
+                match_id=_mid,
+                home_team=_home,
+                away_team=_away,
+                match_date=_date_str,
+                stage=_stage,
+                pred_winner=_pred.favourite,
+                home_prob=_pred.home_prob,
+                draw_prob=_pred.draw_prob,
+                away_prob=_pred.away_prob,
+                pred_home_goals=_pred.predicted_score[0] if _pred.predicted_score else None,
+                pred_away_goals=_pred.predicted_score[1] if _pred.predicted_score else None,
+            )
+            _hs, _as = _result["home_score"], _result["away_score"]
+            _ar = "H" if _hs > _as else ("A" if _as > _hs else "D")
+            settle_prediction(_mid, _ar, _hs, _as)
+        except Exception as _exc:
+            logger.warning("Retrospective prediction failed for %s vs %s: %s", _home, _away, _exc)
 
     logger.info("All models loaded successfully.")
     return {
@@ -450,6 +509,24 @@ if page == "today":
     )
     st.divider()
 
+    # ── Prediction accuracy widget ────────────────────────────────────────
+    from data.cache import get_prediction_accuracy, get_prediction_history
+    _acc = get_prediction_accuracy()
+    if _acc["settled"] > 0:
+        _col1, _col2, _col3, _col4 = st.columns(4)
+        with _col1:
+            st.metric("PREDICTIONS MADE", _acc["total"])
+        with _col2:
+            st.metric("SETTLED", _acc["settled"])
+        with _col3:
+            st.metric("CORRECT", _acc["correct"])
+        with _col4:
+            _color = "normal" if _acc["accuracy_pct"] >= 50 else "inverse"
+            st.metric("ACCURACY", f"{_acc['accuracy_pct']:.1f}%",
+                      delta=f"{_acc['correct']}/{_acc['settled']} matches",
+                      delta_color=_color)
+        st.divider()
+
     predictions = get_all_predictions(dc_weight, xgb_weight)
     all_odds    = get_all_odds()
 
@@ -459,6 +536,13 @@ if page == "today":
         portfolio = build_all_recommendations(
             predictions, all_odds, bankroll, kelly_fraction, min_ev
         )
+
+        # ── Stake.com Betting Slip ────────────────────────────────────────
+        from ui.betting_advice import render_stake_slip
+        with st.expander("🎯 TODAY'S STAKE.COM BETTING SLIP", expanded=True):
+            render_stake_slip(portfolio, bankroll)
+
+        st.divider()
 
         # Notification banner for active signals
         if portfolio:
@@ -552,6 +636,13 @@ elif page == "tracker":
 
     # Tracker section
     render_bet_tracker()
+
+    # ── Prediction History ────────────────────────────────────────────────
+    st.divider()
+    st.markdown("## 🎯 PREDICTION HISTORY")
+    from data.cache import get_prediction_history, get_prediction_accuracy
+    from ui.betting_advice import render_prediction_history
+    render_prediction_history()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: ◉ SIGNAL ANALYSIS (ELO Rankings + Model Insights)

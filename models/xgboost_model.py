@@ -62,16 +62,20 @@ class WorldCupXGBClassifier:
         # Lazy import xgboost to avoid slow import at module level
         import xgboost as xgb
         self._model = xgb.XGBClassifier(
-            n_estimators=500,
-            max_depth=4,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
+            n_estimators=600,
+            max_depth=3,
+            learning_rate=0.04,
+            subsample=0.75,
+            colsample_bytree=0.7,
+            min_child_weight=5,
+            gamma=0.1,
+            reg_alpha=0.1,
+            reg_lambda=1.5,
             objective="multi:softprob",
             num_class=3,
             eval_metric="mlogloss",
             random_state=42,
-            early_stopping_rounds=50,
+            early_stopping_rounds=40,
             verbosity=0,
             n_jobs=-1,
         )
@@ -82,6 +86,7 @@ class WorldCupXGBClassifier:
         X: pd.DataFrame,
         y: pd.Series,
         eval_fraction: float = 0.15,
+        sample_weight: "np.ndarray | None" = None,
     ) -> "WorldCupXGBClassifier":
         """Train the XGBoost classifier.
 
@@ -103,15 +108,25 @@ class WorldCupXGBClassifier:
         X = X[FEATURE_NAMES]
 
         # Hold out a validation set for early stopping
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y,
-            test_size=eval_fraction,
-            random_state=42,
-            stratify=y,       # maintain class distribution
-        )
+        if sample_weight is not None:
+            X_train, X_val, y_train, y_val, sw_train, _ = train_test_split(
+                X, y, sample_weight,
+                test_size=eval_fraction,
+                random_state=42,
+                stratify=y,
+            )
+        else:
+            X_train, X_val, y_train, y_val = train_test_split(
+                X, y,
+                test_size=eval_fraction,
+                random_state=42,
+                stratify=y,
+            )
+            sw_train = None
 
         self._model.fit(
             X_train, y_train,
+            sample_weight=sw_train,
             eval_set=[(X_val, y_val)],
             verbose=False,
         )
@@ -212,6 +227,7 @@ def load_or_train_xgb(
     feature_engineer: object,
     training_df: pd.DataFrame,
     force_retrain: bool = False,
+    sample_weight: "np.ndarray | None" = None,
 ) -> WorldCupXGBClassifier:
     """Load a saved model or train a new one if not found.
 
@@ -254,7 +270,7 @@ def load_or_train_xgb(
         )
 
     model = WorldCupXGBClassifier()
-    model.fit(X, y)
+    model.fit(X, y, sample_weight=sample_weight)
     model.save()
 
     return model

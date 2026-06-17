@@ -218,3 +218,195 @@ def render_bet_tracker() -> None:
 
     if not bets:
         st.info("No bets logged yet. Use the 'LOG BET' button on any signal card.")
+
+
+def render_prediction_history() -> None:
+    """Render prediction history table with accuracy stats."""
+    from data.cache import get_prediction_history, get_prediction_accuracy
+
+    history = get_prediction_history()
+    acc = get_prediction_accuracy()
+
+    if not history:
+        st.info("Prediction history will appear here after the first model load. Refresh the page.")
+        return
+
+    # Accuracy summary
+    settled = [h for h in history if h["actual_result"] is not None]
+    pending = [h for h in history if h["actual_result"] is None]
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("TOTAL PREDICTED", acc["total"])
+    with c2:
+        st.metric("SETTLED", acc["settled"])
+    with c3:
+        st.metric("CORRECT", acc["correct"])
+    with c4:
+        color = "normal" if acc["accuracy_pct"] >= 50 else "inverse"
+        st.metric(
+            "MODEL ACCURACY",
+            f"{acc['accuracy_pct']:.1f}%",
+            delta=f"{acc['correct']}/{acc['settled']} correct" if acc["settled"] else "pending",
+            delta_color=color,
+        )
+
+    if settled:
+        st.markdown("#### ✓ SETTLED PREDICTIONS")
+        rows = []
+        for h in settled:
+            actual_score = f"{h['actual_home_goals']} – {h['actual_away_goals']}" if h["actual_home_goals"] is not None else "?"
+            pred_score = f"{h['pred_home_goals']} – {h['pred_away_goals']}" if h["pred_home_goals"] is not None else "?"
+            result_icon = "✅" if h["correct"] else "❌"
+            rows.append({
+                "Date":      h["match_date"],
+                "Match":     f"{h['home_team']} vs {h['away_team']}",
+                "Predicted": h["pred_winner"],
+                "Pred Score": pred_score,
+                "Actual":    actual_score,
+                "Correct":   result_icon,
+                "H%":        f"{h['home_prob']*100:.0f}",
+                "D%":        f"{h['draw_prob']*100:.0f}",
+                "A%":        f"{h['away_prob']*100:.0f}",
+            })
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if pending:
+        st.markdown("#### ⏳ PENDING PREDICTIONS")
+        rows = []
+        for h in pending:
+            pred_score = f"{h['pred_home_goals']} – {h['pred_away_goals']}" if h["pred_home_goals"] is not None else "?"
+            rows.append({
+                "Date":      h["match_date"],
+                "Match":     f"{h['home_team']} vs {h['away_team']}",
+                "Predicted": h["pred_winner"],
+                "Pred Score": pred_score,
+                "H%":        f"{h['home_prob']*100:.0f}",
+                "D%":        f"{h['draw_prob']*100:.0f}",
+                "A%":        f"{h['away_prob']*100:.0f}",
+            })
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def render_stake_slip(
+    recommendations: list[BetRecommendation],
+    bankroll: float,
+) -> None:
+    """Render a Stake.com formatted betting slip with navigation guide."""
+    st.markdown(
+        """
+        <div style="
+            background: linear-gradient(135deg, #0D0D2B 0%, #060611 100%);
+            border: 2px solid #00FFD1;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 16px 0;
+            box-shadow: 0 0 30px #00FFD130;
+        ">
+            <div style="font-family:Orbitron,sans-serif; color:#00FFD1; font-size:18px; font-weight:700; letter-spacing:0.1em;">
+                ⚡ STAKE.COM BETTING SLIP
+            </div>
+            <div style="font-family:monospace; color:#888; font-size:12px; margin-top:6px;">
+                Navigate: Stake.com → Sports → Soccer → FIFA World Cup 2026
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if not recommendations:
+        st.markdown(
+            "<div style='text-align:center; color:#555; padding:20px; font-family:monospace;'>"
+            "NO VALUE BETS TODAY — check back after odds update</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    total_stake = sum(r.stake_amount for r in recommendations)
+    total_exp   = sum(r.stake_amount * r.ev for r in recommendations)
+
+    st.markdown(
+        f"<div style='font-family:monospace; color:#888; font-size:13px; margin-bottom:12px;'>"
+        f"📋 {len(recommendations)} bet(s) · "
+        f"Total stake: <b style='color:#00FFD1;'>£{total_stake:.2f}</b> · "
+        f"Expected profit: <b style='color:#00FF88;'>+£{total_exp:.2f}</b>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    market_nav = {
+        "1X2":    "Match Result",
+        "over_25": "Goals → Over/Under → Over 2.5",
+        "btts":    "Both Teams to Score → Yes",
+    }
+
+    for i, rec in enumerate(recommendations, 1):
+        cfg = TIER_CONFIG.get(rec.confidence_tier, TIER_CONFIG["MEDIUM"])
+        nav_path = market_nav.get(rec.market, rec.market)
+
+        st.markdown(
+            f"""
+            <div style="
+                border: 1px solid {cfg['border']}60;
+                border-left: 4px solid {cfg['border']};
+                background: rgba(6,6,17,0.95);
+                padding: 14px 18px;
+                margin: 8px 0;
+                font-family: 'Share Tech Mono', monospace;
+                box-shadow: 0 0 15px {cfg['border']}15;
+            ">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                    <div>
+                        <span style="color:{cfg['color']}; font-family:Orbitron; font-size:14px; font-weight:700;">
+                            {cfg['icon']} BET {i} — {rec.confidence_tier}
+                        </span>
+                        <div style="margin-top:6px; color:#E0E0FF; font-size:15px; font-weight:bold;">
+                            {rec.outcome_label}
+                        </div>
+                        <div style="margin-top:3px; color:#888; font-size:12px;">
+                            {rec.home_team} vs {rec.away_team} · {rec.match_date}
+                        </div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="color:#FFB800; font-family:Orbitron; font-size:22px; font-weight:700;">@ {rec.decimal_odds:.2f}</div>
+                        <div style="color:#00FFD1; font-size:16px; font-weight:bold; margin-top:2px;">Stake: £{rec.stake_amount:.2f}</div>
+                        <div style="color:#00FF88; font-size:13px;">If wins: +£{rec.potential_profit:.2f}</div>
+                    </div>
+                </div>
+                <div style="margin-top:10px; padding-top:10px; border-top:1px solid #1A1F2E;">
+                    <div style="color:#00FFD180; font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">
+                        📍 Stake.com path: Sports → Soccer → FIFA World Cup 2026 → {rec.home_team} vs {rec.away_team} → {nav_path}
+                    </div>
+                    <div style="margin-top:6px; display:flex; gap:20px; font-size:12px; color:#666;">
+                        <span>Model: <b style="color:{cfg['color']};">{rec.model_prob*100:.1f}%</b></span>
+                        <span>Bookmaker: <b style="color:#888;">{rec.implied_prob*100:.1f}%</b></span>
+                        <span>Edge: <b style="color:{cfg['color']};">{rec.edge_pct_str}</b></span>
+                        <span>EV: <b style="color:{cfg['color']};">{rec.ev_pct_str}</b></span>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        """
+        <div style="
+            background: rgba(0,255,209,0.05);
+            border: 1px solid #00FFD130;
+            border-radius: 4px;
+            padding: 10px 14px;
+            font-family: monospace;
+            font-size: 11px;
+            color: #666;
+            margin-top: 12px;
+        ">
+            ⚠️ Responsible gambling: Never bet more than you can afford to lose.
+            Stakes shown are Kelly Criterion recommendations based on your bankroll setting.
+            Verify odds on Stake.com before placing — live odds may differ from displayed values.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
