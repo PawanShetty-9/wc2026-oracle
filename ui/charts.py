@@ -103,10 +103,10 @@ def probability_bar_chart(
         barmode="stack",
         showlegend=False,
         height=80,
-        margin=dict(l=5, r=5, t=5, b=5),
         xaxis=dict(range=[0, 100], showticklabels=False, showgrid=False),
         yaxis=dict(showticklabels=False, showgrid=False),
     )
+    fig.update_layout(margin=dict(l=5, r=5, t=5, b=5))
     return fig
 
 
