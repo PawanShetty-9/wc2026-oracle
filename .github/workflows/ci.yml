@@ -1,4 +1,4 @@
-name: WC2026 Oracle CI
+name: CI
 
 on:
   push:

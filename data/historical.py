@@ -4,7 +4,7 @@ data/historical.py — Historical International Match Data Loader
 Loads the training dataset for ELO, Dixon-Coles, and XGBoost models.
 
 Data priority (highest to lowest):
-  1. Committed CSV at betting/data/raw/international_results.csv
+  1. Committed CSV at data/raw/international_results.csv
      (sourced from martj42/international_results on GitHub, CC0 license)
   2. Synthetic data generated on-the-fly from seeded random distributions
      (always available, ensures CI and cold-starts never crash)
@@ -24,7 +24,7 @@ HOW TO DEBUG:
     (not the synthetic fallback): load_training_data()["_source"].unique()
   - The _source column is "csv" or "synthetic" for tracing
   - Synthetic data always uses seed=42 for reproducibility
-  - To force re-training: delete betting/data/raw/xgb_model.joblib
+  - To force re-training: delete data/raw/xgb_model.joblib
 """
 
 from __future__ import annotations

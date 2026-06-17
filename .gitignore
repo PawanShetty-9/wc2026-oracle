@@ -10,17 +10,15 @@ venv/
 .venv/
 env/
 
-# Streamlit secrets (never commit real keys)
-.streamlit/secrets.toml
-
-# Model cache and database (auto-generated on startup)
-data/raw/*.joblib
+# Trained models and databases (auto-generated on startup)
+data/raw/xgb_model.joblib
+data/raw/betting_cache.db
 data/raw/*.db
+
+# Streamlit secrets (never commit)
+.streamlit/secrets.toml
 
 # IDE
 .vscode/
 .idea/
 *.swp
-
-# OS
-.DS_Store

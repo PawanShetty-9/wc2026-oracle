@@ -23,7 +23,7 @@ HYPERPARAMETERS:
     reduces variance
 
 PERSISTENCE:
-  Model is saved as a joblib file at betting/data/raw/xgb_model.joblib.
+  Model is saved as a joblib file at data/raw/xgb_model.joblib.
   If the file doesn't exist on cold start, the app auto-trains it.
   Training takes ~10-30 seconds on CPU.
 
@@ -230,7 +230,7 @@ def load_or_train_xgb(
     HOW TO DEBUG:
         - If training takes > 60 seconds: reduce training_df to post-2010 data
         - If you suspect a stale/corrupted model: set force_retrain=True
-          or delete betting/data/raw/xgb_model.joblib manually
+          or delete data/raw/xgb_model.joblib manually
     """
     # Try to load an existing saved model first (fast path)
     if not force_retrain and _MODEL_PATH.exists():
